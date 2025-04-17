@@ -1,0 +1,6 @@
+jax
+flax
+optax
+distrax
+craftax
+wandb

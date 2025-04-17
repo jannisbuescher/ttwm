@@ -3,21 +3,25 @@ import jax.numpy as jnp
 
 import flax.linen as nn
 
-from typing import Dict, List, Sequence
+from typing import Dict, List, Sequence, Tuple
 
+from transformer import Transformer
 
 
 class WorldModelTransformerAR(nn.Module):
     num_layers: int
     layer_width: int
     map_obs_shape: Sequence[int]
+    obs_dims: Dict
+    obs_key_order: Dict
+
 
     def setup(self):
         self.token_up = {
-            **{k: nn.Dense(self.layer_width) for k in obs_dims},
+            **{k: nn.Dense(self.layer_width) for k in self.obs_dims},
             "action": nn.Dense(self.layer_width),
         }
-        self.token_down = {k: nn.Dense(v) for k, v in obs_dims.items()}
+        self.token_down = {k: nn.Dense(v) for k, v in self.obs_dims.items()}
         self.transformer = Transformer(
             num_layers=self.num_layers,
             dim=self.layer_width,
@@ -45,24 +49,24 @@ class WorldModelTransformerAR(nn.Module):
         batch_size = obs["block_map"].shape[0]
         # Reshape each observation component to (batch_size, sequence_length, feature_dim)
         obs_reshaped = {
-            k: obs[k].reshape((batch_size, -1, obs[k].shape[-1])) for k in obs_dims
+            k: obs[k].reshape((batch_size, -1, obs[k].shape[-1])) for k in self.obs_dims
         }
         action_reshaped = action.reshape((batch_size, 1, action.shape[-1]))
 
         # Tokenize and concatenate
-        tokens = {k: self.token_up[k](obs_reshaped[k]) for k in obs_dims}
+        tokens = {k: self.token_up[k](obs_reshaped[k]) for k in self.obs_dims}
         tokens["action"] = self.token_up["action"](action_reshaped)
-        seq = jnp.concatenate([tokens[k] for k in obs_key_order + ("action",)], axis=1)
+        seq = jnp.concatenate([tokens[k] for k in self.obs_key_order + ("action",)], axis=1)
 
         return seq
 
     def detokenize(self, seq, obs):
         next_obs_pred = {
             k: seq[:, self.boundaries[i] : self.boundaries[i + 1]]
-            for i, k in enumerate(obs_key_order)
+            for i, k in enumerate(self.obs_key_order)
         }
 
-        for k in obs_key_order:
+        for k in self.obs_key_order:
             x = jax.nn.softmax(self.token_down[k](next_obs_pred[k]), axis=-1)
             next_obs_pred[k] = x.reshape(obs[k].shape)
 
@@ -71,11 +75,11 @@ class WorldModelTransformerAR(nn.Module):
     def convert_obs_seq_1h(self, obs_seq, obs):
         next_obs_pred = {
             k: obs_seq[:, self.boundaries[i] : self.boundaries[i + 1]]
-            for i, k in enumerate(obs_key_order)
+            for i, k in enumerate(self.obs_key_order)
         }
 
-        for k in obs_key_order:
-            x = jax.nn.one_hot(next_obs_pred[k], axis=-1, num_classes=obs_dims[k])
+        for k in self.obs_key_order:
+            x = jax.nn.one_hot(next_obs_pred[k], axis=-1, num_classes=self.obs_dims[k])
             next_obs_pred[k] = x.reshape(obs[k].shape)
 
         return next_obs_pred
@@ -89,11 +93,11 @@ class WorldModelTransformerAR(nn.Module):
         # Next state prediction with teacher forcing
         next_obs_reshaped = {
             k: next_obs[k].reshape((batch_size, -1, next_obs[k].shape[-1]))
-            for k in obs_dims
+            for k in self.obs_dims
         }
-        next_obs_tokens = {k: self.token_up[k](next_obs_reshaped[k]) for k in obs_dims}
+        next_obs_tokens = {k: self.token_up[k](next_obs_reshaped[k]) for k in self.obs_dims}
         next_obs_seq = jnp.concatenate(
-            [next_obs_tokens[k] for k in obs_key_order], axis=1
+            [next_obs_tokens[k] for k in self.obs_key_order], axis=1
         )
 
         # Append next observation and remove last token (end of next_obs)
@@ -167,10 +171,10 @@ class SamplingStep(nn.Module):
 
         token_index -= self.n_tokens_per_obs
 
-        for i in range(len(obs_key_order)):
+        for i in range(len(self.obs_key_order)):
             obs_key_index = jax.lax.select(
                 token_index < self.boundaries[-i - 1],
-                len(obs_key_order) - i - 1,
+                len(self.obs_key_order) - i - 1,
                 obs_key_index,
             )
         return obs_key_index
@@ -193,8 +197,8 @@ class SamplingStep(nn.Module):
             jnp.ones((batch_size, 1, self.max_obs_dim), dtype=jnp.float32) * -jnp.inf
         )
 
-        for i in range(len(obs_key_order)):
-            k = obs_key_order[i]
+        for i in range(len(self.obs_key_order)):
+            k = self.obs_key_order[i]
 
             dist = self.token_down[k](token)
             if self.temperature == 0.0:
@@ -202,7 +206,7 @@ class SamplingStep(nn.Module):
             else:
                 rng, _rng = jax.random.split(rng)
                 sample = jax.random.categorical(_rng, dist / self.temperature, axis=2)
-            sample_1h = jax.nn.one_hot(sample, num_classes=obs_dims[k])
+            sample_1h = jax.nn.one_hot(sample, num_classes=self.obs_dims[k])
             token_up = self.token_up[k](sample_1h)
             collapsed_token = jax.lax.select(
                 obs_key_index == i, token_up, collapsed_token
@@ -239,3 +243,4 @@ class SamplingStep(nn.Module):
             collapsed_entropy[:, 0],
             collapsed_dist[:, 0, :],
         )
+    
