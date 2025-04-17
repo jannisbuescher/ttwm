@@ -227,6 +227,14 @@ def make_train(config):
                     _rng, env_state, action, env_params
                 )
 
+                jax.debug.callback(print, obsv)
+
+                jax.debug.callback(print, obsv.shape)
+
+                jax.debug.callback(print, last_obs)
+
+                jax.debug.callback(print, last_obs.shape)
+
                 reward_i = jnp.zeros(config["NUM_ENVS"])
 
                 # if config["TRAIN_ICM"]:
